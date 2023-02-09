@@ -1,0 +1,454 @@
+---
+title: "UK TRQ web-scrape timeseries"
+output: html_document
+---
+
+```{r}
+# Set up -------------------------
+
+rm(list=ls()) # remove everything form global environment.
+
+library(tidyverse)
+library(openxlsx) 
+library(readxl)
+library(janitor)
+library(stringr)
+library(rvest)# most common web-scraping R package. (and very easy to pick up!)
+library(tictoc) # simple function to monitor code chunk run time
+library(data.table)
+library(plotly)
+library(tictoc)
+library(lubridate)
+
+path<-setwd(stringr::str_extract(rstudioapi::getActiveDocumentContext()$path,".+[/]"))# set working directory to where your file is saved. 
+
+`%notin%` <- Negate(`%in%`) 
+
+```
+
+
+# Scrape UK TRQ data 
+
+Define webpage to scrape all weblinks which contain the csv files and dates. There is one date per csv file. Each date can be used to iterate through the data. These dates will be used for the time-stamp to create the time-series. 
+
+
+```{r}
+
+url <- "https://www.data.gov.uk/dataset/4a478c7e-16c7-4c28-ab9b-967bb79342e9/uk-trade-quotas"
+
+# scrape all web-links. 
+scrape <- 
+  read_html(url) %>%
+  html_nodes(".govuk-link") %>%
+  html_attr("href")
+
+# filter for .csv links only. 
+scrape_csv <- scrape[grepl("csv",scrape)]
+
+# there is an issue in the web-site where links have been duplicated for the same date
+# manual removal of these links:
+
+scrape_csv = scrape_csv[-c(10:18,22:24,26:31)]
+
+# scrape date of each scrapped web-link. 
+scrape_dates <- 
+  read_html(url) %>%
+  html_nodes(".govuk-table__cell") %>%
+  html_text() %>%
+  stringr::str_squish()
+
+text_search <- ("January|February|March|April|May|June|July|August|September|October|November|December")
+
+# identify dates and remove duplicates. One date-per csv file scraped. 
+dates <- as.Date(unique(scrape_dates[grepl(text_search,scrape_dates)]),format = "%d %B %Y")
+```
+
+## Create function to automate web-scrape of csv files
+
+```{r}
+# create function to scrape data
+# data.table used to increase speed of run time
+
+get_uk_trqData <- function(href,date){
+  
+print(href)
+print(date)
+options(warn=-1) # turn off warning messages
+
+df <- setDT(read.csv(paste0(href,".csv")))
+# date columns to convert
+dateCols = c("quota_definition__validity_start_date",
+             "quota_definition__validity_end_date",
+             "quota_definition__last_allocation_date")
+# columns to select
+keepCols = c("quota__order_number","quota__geographical_areas",
+             "quota__measurement_unit","quota_definition__validity_start_date",
+             "quota_definition__validity_end_date",
+             "quota_definition__last_allocation_date",
+             "quota_definition__status",
+             "quota_definition__initial_volume",
+             "quota_definition__balance",
+             "quota_definition__fill_rate")
+
+df2 <- 
+  df[, quota__order_number := as.character(paste0("0",quota__order_number))
+    ][, (dateCols) := lapply(.SD, FUN = ymd), .SDcols = (dateCols) # convert date columns
+    ][, quota_definition__balance := as.numeric(quota_definition__balance)
+    ][, (keepCols), with = FALSE
+    ][, `:=`(data_date = date, web_link = href)] # add items from scrape to each data table. 
+
+
+}
+
+```
+
+
+### Apply funciton and scrape all TRQ data
+
+```{r}
+
+# running all web links takes several minutes
+tic()
+full_data <-
+  mapply(
+    FUN=get_uk_trqData,
+    href=scrape_csv, 
+    date=dates, 
+    SIMPLIFY = FALSE # simplify = TRUE returns a matrix. 
+    ) 
+
+toc()
+
+# full scraped data as df 
+full_data2 <- data.table::rbindlist(full_data)
+
+# save data
+
+dte <- Sys.Date()
+write.xlsx(full_data2, paste0("outputs/full_data_", dte, ".xlsx"),overwrite = TRUE)
+
+
+```
+
+## Update web-scrape data
+
+So not to have to re-run the full scrape each time which is time consuming, the following code loads in the saved RData, identifies the latest date and scrapes the data from this point forward. 
+
+If this is being ran for the first time - this section can be skipped. 
+
+```{r}
+
+# load in pre-saved RData
+load("outputs/trq_time_series_2023-01-17.RData")
+latest_date <- max(data23$data_date)
+
+# scrape web-site dates
+
+url <- "https://www.data.gov.uk/dataset/4a478c7e-16c7-4c28-ab9b-967bb79342e9/uk-trade-quotas"
+
+scrape_dates <- 
+  read_html(url) %>%
+  html_nodes(".govuk-table__cell") %>%
+  html_text() %>%
+  stringr::str_squish()
+
+text_search <- ("January|February|March|April|May|June|July|August|September|October|November|December")
+
+# identify dates and remove duplicates. One date-per csv file scraped. 
+# convert to date format to extract dates where data doesn't exisit 
+# in current RData
+
+dates <- as.Date(unique(scrape_dates[grepl(text_search,scrape_dates)]),format = "%d %B %Y")
+dates2 = purrr::keep(dates, function(x) x >= "2023-01-17")
+
+# note the dates input is required to be a string for the function
+# convert back to character
+
+
+# scrape csv links
+
+# scrape all web-links. 
+scrape <- 
+  read_html(url) %>%
+  html_nodes(".govuk-link") %>%
+  html_attr("href")
+
+# filter for .csv links only. and reduce length of vector
+scrape_csv <- scrape[grepl("csv",scrape)]
+scrape_csv2 <- scrape_csv[1:length(dates2)]
+                          
+
+# apply list inputs to web-scrape-function
+
+
+tic()
+new_data <-
+  mapply(
+    FUN=get_uk_trqData,
+    href=scrape_csv2, 
+    date=dates2, 
+    SIMPLIFY = FALSE # simplify = TRUE returns a matrix. 
+    ) 
+toc()
+
+new_data2 <- data.table::rbindlist(new_data)
+
+```
+
+
+## Data cleaning 
+
+The data compiled contains all quota data across all quotas and their fill-rate state at the time the file was created, thus creating a time series of fill rates. 
+
+There are a couple of issues to work through to create a more complete data set. First, we want a year-long time series. The data published is sporadic and not daily, for example it can be updated every other week. Therefore we need to create daily data for the full calendar year. The second issue is with these newly create days, there are gaps as no data exists: these need to be filled using either an average or the latest the data closest to the date is used as a substitute. 
+
+
+Need to calculate each individual quota length and the data date distance away from the quota start date - this is in order to establish what day the fill rate is after the quota opens. i.e. how filled is the quota 20 days, 40 days after the quota opens etc. 
+
+
+```{r}
+
+# filter for 2022 data only - which is the quota year with a full calendar years worth of data
+
+filter_Data <- function(.data,.yr){
+  
+  # written using data.table sytax for speed
+  x <- .data[,`:=`(
+                    yr = year(quota_definition__validity_start_date),
+                    yr_data = year(data_date)
+                  )
+            ][yr == .yr & quota_definition__status != "Future"
+            ][, `:=`(
+                     quota_length = # quota length in days
+                        as.numeric(
+                         difftime(
+                           quota_definition__validity_end_date,
+                           quota_definition__validity_start_date,
+                           units =c("days")
+                        )
+                      ),
+                     datacut_day_diff = # difference in days data was extracted to quota start
+                       as.numeric(
+                        difftime( 
+                          data_date,
+                          quota_definition__validity_start_date,
+                          units = c("days")
+                       )
+                    )
+                  )
+             ] 
+
+}
+
+data22 <- filter_Data(.data = full_data2, .yr = 2022)
+data23 <- filter_Data(.data = full_data2, .yr = 2023)
+
+# if this is being run for the first time the next lines can be skipped
+
+data22_new <- filter_Data(.data = new_data2, .yr = 2022) # updated 2022 df
+data23_new <- filter_Data(.data = new_data2, .yr = 2023) # updated 2023 df
+
+#' For data updates, having loaded in the full-data (data22, data23)
+#' the new data can simply be bind together. 
+#' No duplicates exist as the date has been specified and data is in exact same format. 
+
+data22 <- bind_rows(data22,data22_new) %>%
+  arrange(desc(data_date), quota__order_number)
+
+data23 <- bind_rows(data23,data23_new) %>%
+  arrange(desc(data_date), quota__order_number)
+
+
+```
+
+
+We require a dataset for each quota per quota year and the corresponding fill rates each day - after the quota is open for the time series. This can be done by creating each individual quota data set individually, based on each unique quota length and iterated through the entire quota list. 
+
+For data updates, having loaded in the full-data (data22, data23) the new data can simply be bind together. No duplicates exist as the date has been specified and data is in exact same format. 
+
+
+
+## time series function
+
+create and implement function to create a time series for each individual quota form scraped data and bind together. 
+
+```{r}
+
+
+quota_list22 <- data22 %>% 
+  select(quota__order_number) %>%
+  distinct() %>%
+  pull()
+
+quota_list23 <- data23 %>% 
+  select(quota__order_number) %>%
+  distinct() %>%
+  pull()
+
+
+create_timeSeries <- function(quota,yr){
+  
+  #print(quota)
+  
+  # assign data
+  if(yr==2022){data = data22}else{data = data23}
+  
+  
+  quota_len = data %>% 
+    filter(quota__order_number ==quota) %>% 
+    select(quota_length) %>%
+    distinct(quota_length) %>%
+    pull()
+    
+  tryCatch({ # error function for quotas with multiple quota periods (solution tbc). 
+  
+  dt <- data.table(quota_number = quota,
+                   dayno = seq(1,quota_len,1))
+  
+  dt <- dt %>% left_join(
+    data,
+    by = c("dayno"="datacut_day_diff",
+           "quota_number"="quota__order_number")
+  )
+  
+  
+  quota_start = dt %>% # quota period start date
+    filter(!is.na(quota_definition__validity_start_date)) %>%
+    select(quota_definition__validity_start_date) %>% distinct() %>% pull()
+  
+  dt2 <- dt %>% arrange(-dayno) %>%
+    fill(everything()) %>% # fill all blank rows with rows above
+    {if(quota_start == "2022-01-01")
+      mutate(.,
+          quota_definition__fill_rate = # data on website is incorrect for first month
+             ifelse( # therefore set all data to 0 for this period until fix is implemented
+               dayno < 28,
+               0,
+               quota_definition__fill_rate
+             )
+           )
+         else .}
+  
+  # create percentile for day numbers
+  # this is so to compare quotas which have different quota lengths
+  # i.e. compare a 365 day quota with a 200 day quota
+  # via what percentile each day after the quota opens
+  # falls into 
+  
+  dt2$val.percentile <- ecdf(dt2$dayno)(dt2$dayno) 
+  
+  return(dt2)
+  
+  } , error = function(e) { skip_to_next <<- TRUE}) 
+  # if code executed within tr catch breaks
+  # error function skips to next iteration
+  
+  
+}
+
+
+```
+
+
+```{r, echo = FALSE} 
+# 2022 data
+tic()
+
+df22 <-
+  mapply(
+    FUN=create_timeSeries,
+    quota=quota_list22, 
+    yr=2022, 
+    SIMPLIFY = FALSE # simplify = TRUE returns a matrix. 
+    )
+
+df22<-df22[sapply(df22, class) != "logical"] %>%rbindlist(use.names=TRUE) # remove errors from list. 
+toc()
+
+```
+
+
+
+```{r}
+
+tic()
+#2023
+df23 <-
+  mapply(
+    FUN=create_timeSeries,
+    quota=quota_list23, 
+    yr=2023, 
+    SIMPLIFY = FALSE # simplify = TRUE returns a matrix. 
+    )
+
+
+df23<-df23[sapply(df23, class) != "logical"] %>%rbindlist(use.names=TRUE)
+
+toc()
+
+```
+
+
+```{r}
+# match in metadata for output
+metadata <- read_excel("inputs/uk_trq_mapping_output.xlsx") %>% clean_names()
+
+time_series22 <- df22 %>% left_join(metadata, by =c("quota_number"="order_number"))
+time_series23 <- df23 %>% left_join(metadata, by =c("quota_number"="order_number"))
+
+
+```
+
+
+Data has now been extracted and compiled together so for each individual TRQ a corresponding fill-rate is assigned to each day the quota is open, based on the fill-rate from the closet date in which the TRQ fill rates were published. 
+
+there are two issues to resolve, the first is data issues remain. For quotas starting later in the year (November/October) the data has incorrectly been assigned as fully filled when the quota opens - this is incorrect. Therefore manual fix is required. Second is to identify all quotas in original list which data has not been compiled, i.e. for quota with multiple periods for further exploration at a later date. 
+
+
+
+```{r}
+
+
+# having analyses the examples where quotas are filled within the first few days
+# there are only a select number of quotas which this is an issue. 
+
+manual_fix_quotas <- c("051104","051137")
+
+time_series22 <- 
+  time_series22 %>% 
+  mutate(
+    quota_definition__fill_rate =
+      ifelse(
+        (quota_number %in% manual_fix_quotas) &
+        (val.percentile <= 0.05 & quota_definition__fill_rate > 0.1),
+        0,
+        quota_definition__fill_rate
+      )
+  )
+
+
+missing_quota_list <-
+  data22 %>%
+  filter(quota__order_number %notin% {unique(time_series22$quota_number)}) %>%
+  distinct(quota__order_number, .keep_all = TRUE)
+  
+
+# save output
+save(
+  time_series22, # time series datasets
+  time_series23,
+  data22, # full data scrapes
+  data23,
+  dates, # dates of data scraped (used for updating underlying files) 
+  missing_quota_list, # missing data from time series due to multi-quota periods
+  file = paste0("outputs/trq_time_series_",Sys.Date(),".RData")
+  )
+
+
+
+```
+
+
+# End. 
+
+
